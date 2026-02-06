@@ -91,6 +91,11 @@ class Database:
                     total_found INTEGER DEFAULT 0,
                     relevant_count INTEGER DEFAULT 0,
                     analyzed_count INTEGER DEFAULT 0,
+                    -- Token使用统计
+                    api_calls INTEGER DEFAULT 0,
+                    prompt_tokens INTEGER DEFAULT 0,
+                    completion_tokens INTEGER DEFAULT 0,
+                    total_tokens INTEGER DEFAULT 0,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     completed_at TEXT
                 )
@@ -278,6 +283,28 @@ class Database:
             cursor.execute(
                 "UPDATE search_sessions SET completed_at = ? WHERE id = ?",
                 (datetime.now().isoformat(), session_id)
+            )
+
+    def update_session_token_stats(self, session_id: int, token_stats: dict):
+        """更新会话Token使用统计
+
+        Args:
+            session_id: 会话ID
+            token_stats: Token统计信息，包含 api_calls, prompt_tokens, completion_tokens, total_tokens
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE search_sessions
+                   SET api_calls = ?, prompt_tokens = ?, completion_tokens = ?, total_tokens = ?
+                   WHERE id = ?""",
+                (
+                    token_stats.get('api_calls', 0),
+                    token_stats.get('prompt_tokens', 0),
+                    token_stats.get('completion_tokens', 0),
+                    token_stats.get('total_tokens', 0),
+                    session_id
+                )
             )
     
     def get_session(self, session_id: int) -> Optional[Dict[str, Any]]:
