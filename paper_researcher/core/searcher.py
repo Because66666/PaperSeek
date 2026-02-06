@@ -69,8 +69,8 @@ class ArxivSearcher:
                         skipped_count += 1
                         continue
                     
-                    # 检查是否已存在
-                    if db.paper_exists(result.entry_id.split('/')[-1]):
+                    # 检查当前主题下是否已存在（允许不同主题有相同论文）
+                    if db.paper_exists(result.entry_id.split('/')[-1], session_id):
                         continue
                     
                     paper_data = self._parse_arxiv_result(result, session_id)

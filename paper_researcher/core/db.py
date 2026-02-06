@@ -39,7 +39,7 @@ class Database:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS papers (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    arxiv_id TEXT UNIQUE NOT NULL,
+                    arxiv_id TEXT NOT NULL,
                     title TEXT NOT NULL,
                     authors TEXT,
                     abstract TEXT,
@@ -48,18 +48,18 @@ class Database:
                     pdf_url TEXT,
                     pdf_path TEXT,
                     status TEXT DEFAULT 'discovered',
-                    
+
                     -- 筛选相关
                     research_topic TEXT,
                     relevance_score REAL,
                     relevance_reason TEXT,
-                    
+
                     -- 分类
                     improvement_category TEXT,
-                    
+
                     -- 深度分析结果（JSON格式存储）
                     analysis_result TEXT,
-                    
+
                     -- 核心要素
                     problem_definition TEXT,
                     mathematical_modeling TEXT,
@@ -69,13 +69,16 @@ class Database:
                     quantitative_results TEXT,
                     limitations TEXT,
                     innovation_ideas TEXT,
-                    
+
                     -- 时间戳
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    
+
                     -- 检索会话
-                    search_session_id INTEGER
+                    search_session_id INTEGER,
+
+                    -- 复合唯一约束：同一主题下论文不能重复
+                    UNIQUE(arxiv_id, search_session_id)
                 )
             """)
             
@@ -103,19 +106,33 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_papers_session ON papers(search_session_id)
             """)
-            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_papers_topic ON papers(research_topic)
+            """)
+
             conn.commit()
     
     # ==================== 论文操作 ====================
     
-    def paper_exists(self, arxiv_id: str) -> bool:
-        """检查论文是否已存在"""
+    def paper_exists(self, arxiv_id: str, session_id: int = None) -> bool:
+        """检查论文是否已存在
+        
+        Args:
+            arxiv_id: arXiv ID
+            session_id: 检索会话ID，如果指定则检查该主题下是否存在
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT 1 FROM papers WHERE arxiv_id = ?",
-                (arxiv_id,)
-            )
+            if session_id:
+                cursor.execute(
+                    "SELECT 1 FROM papers WHERE arxiv_id = ? AND search_session_id = ?",
+                    (arxiv_id, session_id)
+                )
+            else:
+                cursor.execute(
+                    "SELECT 1 FROM papers WHERE arxiv_id = ?",
+                    (arxiv_id,)
+                )
             return cursor.fetchone() is not None
     
     def add_paper(self, paper_data: Dict[str, Any]) -> int:
@@ -165,12 +182,24 @@ class Database:
             row = cursor.fetchone()
             return dict(row) if row else None
     
-    def get_papers_by_status(self, status: str, session_id: int = None) -> List[Dict[str, Any]]:
-        """获取指定状态的论文"""
+    def get_papers_by_status(self, status: str, session_id: int = None, research_topic: str = None) -> List[Dict[str, Any]]:
+        """获取指定状态的论文
+        
+        Args:
+            status: 论文状态
+            session_id: 检索会话ID（可选）
+            research_topic: 研究主题（可选），用于跨会话获取相同主题的论文
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
-            if session_id:
+            if research_topic:
+                # 按研究主题查询（跨会话）
+                cursor.execute(
+                    "SELECT * FROM papers WHERE status = ? AND research_topic = ?",
+                    (status, research_topic)
+                )
+            elif session_id:
                 cursor.execute(
                     "SELECT * FROM papers WHERE status = ? AND search_session_id = ?",
                     (status, session_id)
