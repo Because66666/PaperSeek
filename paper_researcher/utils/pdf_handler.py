@@ -83,19 +83,23 @@ class PDFHandler:
                 pdf_path.unlink()
             return None
     
-    def extract_text(self, pdf_path: Path) -> str:
+    def extract_text(self, pdf_path) -> str:
         """
         从PDF提取文本
         
         Args:
-            pdf_path: PDF文件路径
+            pdf_path: PDF文件路径（Path对象或字符串）
         
         Returns:
             提取的文本内容
         """
+        # 确保 pdf_path 是 Path 对象
+        if isinstance(pdf_path, str):
+            pdf_path = Path(pdf_path)
+        
         try:
             text = ""
-            with fitz.open(pdf_path) as doc:
+            with fitz.open(str(pdf_path)) as doc:
                 for page_num, page in enumerate(doc):
                     text += f"\n--- Page {page_num + 1} ---\n"
                     text += page.get_text()

@@ -24,6 +24,7 @@ class ArxivSearcher:
         keywords: List[str],
         session_id: int,
         max_results: int = None,
+        offset: int = 0,
         sort_by: arxiv.SortCriterion = arxiv.SortCriterion.SubmittedDate,
         sort_order: arxiv.SortOrder = arxiv.SortOrder.Descending
     ) -> List[Dict[str, Any]]:
@@ -34,6 +35,7 @@ class ArxivSearcher:
             keywords: 关键词列表
             session_id: 检索会话ID
             max_results: 最大结果数
+            offset: 检索偏移量（用于分页，跳过已检索的论文）
             sort_by: 排序方式
             sort_order: 排序顺序
         
@@ -44,7 +46,7 @@ class ArxivSearcher:
         
         # 构建查询字符串
         query = self._build_query(keywords)
-        console.log(f"[blue]检索查询: {query}")
+        console.log(f"[blue]检索查询: {query} (偏移量: {offset}, 数量: {max_results})")
         
         # 创建搜索对象
         search = arxiv.Search(
@@ -55,12 +57,18 @@ class ArxivSearcher:
         )
         
         papers = []
+        skipped_count = 0
         
         with Progress() as progress:
             task = progress.add_task("[cyan]检索arXiv论文...", total=None)
             
             try:
                 for result in self.client.results(search):
+                    # 跳过偏移量之前的论文
+                    if skipped_count < offset:
+                        skipped_count += 1
+                        continue
+                    
                     # 检查是否已存在
                     if db.paper_exists(result.entry_id.split('/')[-1]):
                         continue
@@ -97,7 +105,7 @@ class ArxivSearcher:
         if len(keywords) == 1:
             return keywords[0]
         
-        # 多个关键词使用AND连接
+        # 多个关键词使用OR连接（只要匹配任意一个关键词即可）
         processed_keywords = []
         for kw in keywords:
             # 如果关键词包含空格，用引号包裹
@@ -106,7 +114,7 @@ class ArxivSearcher:
             else:
                 processed_keywords.append(kw)
         
-        return " AND ".join(processed_keywords)
+        return " OR ".join(processed_keywords)
     
     def _parse_arxiv_result(self, result: arxiv.Result, session_id: int) -> Dict[str, Any]:
         """解析arXiv结果为字典格式"""
@@ -160,7 +168,8 @@ class ArxivSearcher:
 def search_papers(
     keywords: List[str],
     session_id: int,
-    max_results: int = None
+    max_results: int = None,
+    offset: int = 0
 ) -> List[Dict[str, Any]]:
     """
     便捷函数：检索arXiv论文
@@ -169,9 +178,10 @@ def search_papers(
         keywords: 关键词列表
         session_id: 检索会话ID
         max_results: 最大结果数
+        offset: 检索偏移量（用于分页）
     
     Returns:
         检索到的论文列表
     """
     searcher = ArxivSearcher()
-    return searcher.search_papers(keywords, session_id, max_results)
+    return searcher.search_papers(keywords, session_id, max_results, offset)

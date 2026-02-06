@@ -20,7 +20,7 @@ sys.path.insert(0, str(project_root))
 from core.config import MAX_PAPERS_PER_SEARCH, MAX_PAPERS_FOR_ANALYSIS, RELEVANCE_SCORE_THRESHOLD
 from core.db import db
 from core.searcher import search_papers
-from core.analyzer import PaperAnalyzer
+from core.analyzer import PaperAnalyzer, generate_keywords_for_topic
 from utils.pdf_handler import PDFHandler
 from utils.exporter import ReportExporter
 
@@ -31,8 +31,8 @@ def print_banner():
     """打印程序横幅"""
     banner = """
     ╔══════════════════════════════════════════════════════════╗
-    ║           学术论文智能检索与分析系统                      ║
-    ║              Academic Paper Research Assistant           ║
+    ║           学术论文智能检索与分析系统                     ║
+    ║           Academic Paper Research Assistant              ║
     ╚══════════════════════════════════════════════════════════╝
     """
     console.print(Panel(banner, style="bold blue"))
@@ -87,7 +87,8 @@ async def download_pdfs_for_papers(papers: List[dict]):
 
 @click.command()
 @click.option('--topic', '-t', required=True, help='研究主题，如 "LoRA改进方法"')
-@click.option('--keywords', '-k', multiple=True, required=True, help='检索关键词，可多次使用，如 -k "LoRA" -k "Low Rank"')
+@click.option('--keywords', '-k', multiple=True, required=False, help='手动指定检索关键词（可选），如 -k "LoRA" -k "Low Rank"')
+@click.option('--auto-keywords', '-ak', is_flag=True, default=True, help='使用AI自动生成检索关键词（默认开启）')
 @click.option('--max-search', '-ms', default=100, help=f'最大检索论文数（第一层漏斗-泛读），默认100')
 @click.option('--max-analysis', '-ma', default=20, help=f'最大精读分析数（第二层漏斗-精读），默认20')
 @click.option('--relevance-threshold', '-rt', default=60, help=f'相关度分数阈值，低于此分数不进入精读，默认60')
@@ -100,6 +101,7 @@ async def download_pdfs_for_papers(papers: List[dict]):
 def main(
     topic: str,
     keywords: tuple,
+    auto_keywords: bool,
     max_search: int,
     max_analysis: int,
     relevance_threshold: float,
@@ -114,15 +116,22 @@ def main(
     学术论文智能检索与分析系统 - 漏斗式过滤
     
     工作流程:
-        第一层漏斗: 检索上限(max-search) → 泛读筛选
-        第二层漏斗: 精读上限(max-analysis) → 深度分析
+        1. AI根据研究主题自动生成英文检索关键词
+        2. 第一层漏斗: 检索上限(max-search) → 泛读筛选
+        3. 第二层漏斗: 精读上限(max-analysis) → 深度分析
     
     示例:
+        # 默认模式：AI自动生成关键词
+        python main.py run -t "LoRA改进方法"
+        
+        # 手动指定关键词（覆盖自动生成）
+        python main.py run -t "LoRA改进方法" -k "LoRA" -k "Low Rank Adaptation" --auto-keywords=False
+        
         # 检索100篇，筛选后精读分析最相关的20篇
-        python main.py run -t "LoRA改进方法" -k "LoRA" -ms 100 -ma 20
+        python main.py run -t "LoRA改进方法" -ms 100 -ma 20
         
         # 检索50篇，精读分析前10篇（相关度>70）
-        python main.py run -t "LoRA改进方法" -k "LoRA" -ms 50 -ma 10 -rt 70
+        python main.py run -t "LoRA改进方法" -ms 50 -ma 10 -rt 70
     """
     print_banner()
     
@@ -132,7 +141,26 @@ def main(
         console.print("[red]错误: 未配置API密钥，请在.env文件中设置DOUBAO_API_KEY")
         return
     
-    keywords_list = list(keywords)
+    # 处理关键词：自动生成或手动指定
+    if keywords:
+        # 用户手动指定了关键词
+        keywords_list = list(keywords)
+        console.print(f"[blue]使用手动指定的关键词: {', '.join(keywords_list)}")
+    elif auto_keywords:
+        # 使用AI自动生成关键词
+        console.print(f"[blue]正在根据研究主题生成检索关键词...")
+        try:
+            keywords_list = asyncio.run(generate_keywords_for_topic(topic))
+            if not keywords_list:
+                console.print("[yellow]关键词生成失败，使用主题本身作为关键词")
+                keywords_list = [topic]
+        except Exception as e:
+            console.print(f"[red]关键词生成出错: {e}")
+            keywords_list = [topic]
+    else:
+        # 没有指定关键词且关闭自动生成
+        console.print("[red]错误: 未指定关键词且未开启自动生成，请使用 -k 指定关键词或开启 --auto-keywords")
+        return
     
     # 如果指定了session_id，使用已有会话
     if session_id:
@@ -163,32 +191,79 @@ def main(
             console.print(f"  Markdown: {md_path}")
         return
     
-    # 步骤1: 检索论文（第一层漏斗）
+    # 创建共享的analyzer实例用于Token统计
+    analyzer = PaperAnalyzer()
+    
+    # 步骤1 & 2: 循环检索 + 摘要筛选（漏斗式检索）
     if not skip_search:
-        console.print("\n[bold cyan]步骤 1/4: 检索arXiv论文（第一层漏斗 - 泛读上限）...")
-        papers = search_papers(keywords_list, session_id, max_search)
-        console.print(f"[green]检索到 {len(papers)} 篇新论文（目标: {max_search}篇）")
+        console.print("\n[bold cyan]步骤 1-2: 循环检索 + 摘要筛选（漏斗式检索）...")
+        
+        # 初始化检索参数
+        current_offset = 0
+        batch_size = max_search  # 每批检索数量
+        max_total_search = 500  # 最多检索总数（防止无限循环）
+        relevant_target = max_analysis  # 第二层漏斗目标
+        
+        total_searched = 0
+        iteration = 0
+        relevant_count = 0  # 初始化相关论文计数
+        
+        while True:
+            iteration += 1
+            console.print(f"\n[bold yellow]=== 第 {iteration} 轮检索 ===")
+            console.print(f"[blue]当前偏移量: {current_offset}, 本轮检索: {batch_size}篇")
+            
+            # 步骤1: 检索一批论文
+            papers = search_papers(keywords_list, session_id, batch_size, current_offset)
+            total_searched += len(papers)
+            
+            if len(papers) == 0:
+                console.print("[yellow]没有更多新论文，停止检索")
+                break
+            
+            console.print(f"[green]本轮检索到 {len(papers)} 篇新论文")
+            
+            # 步骤2: 摘要筛选（刚检索到的论文）
+            if not skip_screening:
+                console.print(f"[blue]对本轮 {len(papers)} 篇论文进行摘要筛选...")
+                asyncio.run(analyzer.process_abstract_screening(papers, research_topic))
+            
+            # 检查当前相关论文数量
+            all_relevant = db.get_papers_by_status('relevant', session_id)
+            relevant_count = len(all_relevant)
+            console.print(f"[green]当前相关论文总数: {relevant_count}/{relevant_target}")
+            
+            # 判断是否达到目标
+            if relevant_count >= relevant_target:
+                console.print(f"[bold green]✓ 已达到第二层漏斗目标 ({relevant_count} >= {relevant_target})")
+                break
+            
+            # 检查是否超过最大检索限制
+            if total_searched >= max_total_search:
+                console.print(f"[yellow]⚠ 已达到最大检索限制 ({max_total_search})，停止检索")
+                break
+            
+            # 更新偏移量，准备下一轮
+            current_offset += batch_size
+            console.print(f"[blue]相关论文不足，继续下一轮检索...")
+        
+        console.print(f"\n[bold green]检索完成: 共检索 {total_searched} 篇，筛选出 {relevant_count} 篇相关论文")
     else:
         console.print("\n[yellow]跳过检索步骤")
-        papers = db.get_papers_by_status('discovered', session_id)
-    
-    # 步骤2: 摘要筛选
-    if not skip_screening:
-        console.print("\n[bold cyan]步骤 2/4: 摘要筛选...")
-        papers_to_screen = db.get_papers_by_status('discovered', session_id)
-        if papers_to_screen:
-            analyzer = PaperAnalyzer()
-            asyncio.run(analyzer.process_abstract_screening(papers_to_screen, research_topic))
-        else:
-            console.print("[yellow]没有需要筛选的论文")
-    else:
-        console.print("\n[yellow]跳过摘要筛选")
+        if not skip_screening:
+            console.print("\n[bold cyan]步骤 2: 摘要筛选（已有数据）...")
+            papers_to_screen = db.get_papers_by_status('discovered', session_id)
+            if papers_to_screen:
+                asyncio.run(analyzer.process_abstract_screening(papers_to_screen, research_topic))
+            else:
+                console.print("[yellow]没有需要筛选的论文")
     
     # 步骤3: 下载PDF（第二层漏斗 - 只下载进入精读的论文）
+    # 注意：获取所有会话中与当前研究主题匹配的relevant论文
     if not skip_download:
-        console.print("\n[bold cyan]步骤 3/4: 下载PDF（第二层漏斗 - 精读上限）...")
-        # 获取相关论文，按相关度分数排序
-        all_relevant = db.get_papers_by_status('relevant', session_id)
+        console.print("\n[bold cyan]步骤 3: 下载PDF（第二层漏斗 - 精读上限）...")
+        # 获取所有会话中与当前研究主题匹配的相关论文
+        all_relevant = db.get_papers_by_status('relevant', research_topic=research_topic)
         # 过滤掉低于阈值的
         filtered = [p for p in all_relevant if p.get('relevance_score', 0) >= relevance_threshold]
         # 按分数排序，取前max_analysis篇
@@ -203,7 +278,7 @@ def main(
                 'relevance_reason': paper.get('relevance_reason', '') + f' [未进入精读: 排名>{max_analysis}]'
             })
         
-        console.print(f"[blue]相关论文: {len(all_relevant)}篇, 超过阈值({relevance_threshold}): {len(filtered)}篇, 进入精读: {len(papers_to_download)}篇")
+        console.print(f"[blue]主题'{research_topic[:30]}...'的相关论文: {len(all_relevant)}篇, 超过阈值({relevance_threshold}): {len(filtered)}篇, 进入精读: {len(papers_to_download)}篇")
         
         if papers_to_download:
             asyncio.run(download_pdfs_for_papers(papers_to_download))
@@ -213,11 +288,14 @@ def main(
         console.print("\n[yellow]跳过PDF下载")
     
     # 步骤4: 深度分析
+    # 注意：获取所有会话中与当前研究主题匹配的已下载PDF论文
     if not skip_analysis:
-        console.print("\n[bold cyan]步骤 4/4: 深度分析...")
-        papers_to_analyze = db.get_papers_by_status('pdf_downloaded', session_id)
+        console.print("\n[bold cyan]步骤 4: 深度分析...")
+        # 获取所有已下载PDF且与当前研究主题匹配的论文
+        all_downloaded = db.get_papers_by_status('pdf_downloaded')
+        papers_to_analyze = [p for p in all_downloaded if p.get('research_topic') == research_topic]
         if papers_to_analyze:
-            analyzer = PaperAnalyzer()
+            console.print(f"[blue]共 {len(papers_to_analyze)} 篇论文需要深度分析")
             asyncio.run(analyzer.process_full_analysis(papers_to_analyze, research_topic))
         else:
             console.print("[yellow]没有需要分析的论文")
@@ -227,9 +305,24 @@ def main(
     # 更新会话统计
     db.update_session_stats(session_id)
     
+    # 获取并保存Token使用统计
+    token_stats = analyzer.get_token_stats()
+    db.update_session_token_stats(session_id, token_stats)
+    
     # 打印统计
     console.print("\n[bold cyan]处理统计:")
     print_statistics(session_id)
+    
+    # 打印Token使用统计
+    console.print("\n[bold cyan]Token使用统计:")
+    token_table = Table(show_header=True, header_style="bold magenta")
+    token_table.add_column("指标", style="cyan")
+    token_table.add_column("数量", style="green")
+    token_table.add_row("API调用次数", f"{token_stats['api_calls']:,}")
+    token_table.add_row("输入Tokens (Prompt)", f"{token_stats['prompt_tokens']:,}")
+    token_table.add_row("输出Tokens (Completion)", f"{token_stats['completion_tokens']:,}")
+    token_table.add_row("总Tokens", f"{token_stats['total_tokens']:,}")
+    console.print(token_table)
     
     # 导出结果
     console.print("\n[bold cyan]导出结果...")

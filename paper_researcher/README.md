@@ -84,26 +84,44 @@ PDF_DOWNLOAD_PATH=papers_output/pdfs
 本系统采用**漏斗式过滤**策略：
 
 ```
-第一层漏斗（泛读）: 检索上限 --max-search 篇
+1. AI智能生成关键词: 根据研究主题自动生成英文检索关键词
+    ↓
+2. 第一层漏斗（泛读）: 检索上限 --max-search 篇
     ↓ AI摘要筛选
-第二层漏斗（精读）: 取最相关的 --max-analysis 篇（相关度>--relevance-threshold）
+3. 第二层漏斗（精读）: 取最相关的 --max-analysis 篇（相关度>--relevance-threshold）
     ↓ PDF下载 + 深度分析
-最终报告
+4. 最终报告
 ```
 
 ### 完整流程（检索 → 筛选 → 下载 → 分析 → 导出）
 
-```bash
-# 检索100篇，筛选后精读分析最相关的20篇（相关度>60）
-python main.py run -t "LoRA改进方法" -k "LoRA" -k "Low Rank Adaptation" -ms 100 -ma 20
+**默认模式（推荐）：AI自动生成关键词**
 
-# 检索50篇，精读分析前10篇（相关度>70）
-python main.py run -t "LoRA改进方法" -k "LoRA" -ms 50 -ma 10 -rt 70
+```bash
+# 最简单的用法：只需提供研究主题
+python main.py run -t "LoRA改进方法"
+
+# 指定漏斗参数
+python main.py run -t "LoRA改进方法" -ms 100 -ma 20
+
+# 中文主题也支持
+python main.py run -t "大语言模型微调技术"
+```
+
+**高级用法：手动指定关键词**
+
+```bash
+# 手动指定关键词（覆盖自动生成）
+python main.py run -t "LoRA改进方法" -k "LoRA" -k "Low Rank Adaptation" --auto-keywords=False
+
+# 同时使用自动生成和手动关键词
+python main.py run -t "LoRA改进方法" -k "QLoRA" -k "AdaLoRA"
 ```
 
 参数说明：
-- `-t, --topic`: 研究主题
-- `-k, --keywords`: 检索关键词（可多次使用）
+- `-t, --topic`: 研究主题（**必需**）
+- `-k, --keywords`: 手动指定检索关键词（可选，覆盖自动生成）
+- `--auto-keywords`: 使用AI自动生成关键词（默认开启）
 - `-ms, --max-search`: 第一层漏斗 - 最大检索论文数（泛读上限，默认100）
 - `-ma, --max-analysis`: 第二层漏斗 - 最大精读分析数（默认20）
 - `-rt, --relevance-threshold`: 相关度分数阈值（默认60，低于此分数不进入精读）

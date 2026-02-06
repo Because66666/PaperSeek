@@ -49,12 +49,32 @@ class PaperAnalyzer:
         )
         self.model = DOUBAO_MODEL_NAME
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+        # Token 使用统计
+        self.token_stats = {
+            'prompt_tokens': 0,
+            'completion_tokens': 0,
+            'total_tokens': 0,
+            'api_calls': 0
+        }
+    
+    def get_token_stats(self) -> Dict[str, int]:
+        """获取Token使用统计"""
+        return self.token_stats.copy()
+    
+    def reset_token_stats(self):
+        """重置Token统计"""
+        self.token_stats = {
+            'prompt_tokens': 0,
+            'completion_tokens': 0,
+            'total_tokens': 0,
+            'api_calls': 0
+        }
     
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10)
     )
-    async def _call_api(self, messages: List[Dict[str, str]], temperature: float = 0.3) -> str:
+    async def _call_api(self, messages: List[Dict[str, str]], temperature: float = 0.3) -> tuple:
         """
         调用豆包API
         
@@ -63,7 +83,7 @@ class PaperAnalyzer:
             temperature: 温度参数
         
         Returns:
-            API响应文本
+            (API响应文本, usage统计字典)
         """
         async with self.semaphore:
             try:
@@ -73,7 +93,25 @@ class PaperAnalyzer:
                     temperature=temperature,
                     max_tokens=4000
                 )
-                return response.choices[0].message.content
+                
+                # 提取文本内容
+                content = response.choices[0].message.content
+                
+                # 提取Token使用统计
+                usage = {}
+                if hasattr(response, 'usage') and response.usage:
+                    usage = {
+                        'prompt_tokens': response.usage.prompt_tokens or 0,
+                        'completion_tokens': response.usage.completion_tokens or 0,
+                        'total_tokens': response.usage.total_tokens or 0
+                    }
+                    # 累加到总计
+                    self.token_stats['prompt_tokens'] += usage['prompt_tokens']
+                    self.token_stats['completion_tokens'] += usage['completion_tokens']
+                    self.token_stats['total_tokens'] += usage['total_tokens']
+                    self.token_stats['api_calls'] += 1
+                
+                return content, usage
             except Exception as e:
                 console.log(f"[red]API调用失败: {e}")
                 raise
@@ -111,7 +149,7 @@ class PaperAnalyzer:
         ]
         
         try:
-            response = await self._call_api(messages, temperature=0.3)
+            response, _ = await self._call_api(messages, temperature=0.3)
             
             # 解析JSON响应
             result = json.loads(response)
@@ -176,7 +214,7 @@ class PaperAnalyzer:
         ]
         
         try:
-            response = await self._call_api(messages, temperature=0.3)
+            response, _ = await self._call_api(messages, temperature=0.3)
             
             # 清理响应，提取JSON部分
             response = response.strip()
@@ -344,6 +382,80 @@ class PaperAnalyzer:
         console.log("[green]深度分析完成")
 
 
+    async def generate_search_keywords(self, research_topic: str) -> List[str]:
+        """
+        根据研究主题生成arXiv检索关键词（英文）
+        
+        Args:
+            research_topic: 研究主题（可以是中文或英文）
+        
+        Returns:
+            英文关键词列表
+        """
+        prompt = f"""你是一位专业的学术论文检索专家。请根据以下研究主题，生成适合在arXiv上检索的英文关键词。
+
+研究主题: "{research_topic}"
+
+要求：
+1. 生成英文关键词或短语
+2. 关键词应该覆盖主题的核心概念
+3. 考虑使用同义词或相关术语
+4. 优先使用学术界常用的术语
+5. 如果主题是中文，请准确翻译为英文学术术语
+6. 覆盖与核心概念强关联的同领域技术 / 方法术语
+7. 包含核心方法 / 技术的变体、改进型、衍生型术语
+8. 涵盖支撑核心概念的底层理论 / 数学基础术语
+9. 补充 arXiv 对应学科的领域通用术语
+10. 包含核心技术的关键参数 / 核心模块术语
+
+
+请按以下JSON格式输出：
+{{
+    "keywords": ["keyword1", "keyword2", "keyword3"]
+}}
+
+注意：
+- 只输出JSON格式
+- 关键词必须是英文
+- 不要包含解释性文字"""
+
+        messages = [
+            {"role": "system", "content": "你是一位专业的学术论文检索专家，擅长将研究主题转化为有效的检索关键词。"},
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            response, _ = await self._call_api(messages, temperature=0.3)
+            
+            # 清理响应
+            response = response.strip()
+            if response.startswith('```json'):
+                response = response[7:]
+            if response.startswith('```'):
+                response = response[3:]
+            if response.endswith('```'):
+                response = response[:-3]
+            response = response.strip()
+            
+            result = json.loads(response)
+            keywords = result.get('keywords', [])
+            
+            # 确保返回的是列表
+            if not isinstance(keywords, list):
+                keywords = [str(keywords)]
+            
+            # 过滤空字符串
+            keywords = [k.strip() for k in keywords if k and k.strip()]
+            
+            console.log(f"[green]生成检索关键词: {', '.join(keywords)}")
+            return keywords
+            
+        except Exception as e:
+            console.log(f"[red]生成关键词失败: {e}")
+            # 如果生成失败，返回主题本身作为关键词
+            return [research_topic]
+
+
 # 便捷函数
 async def screen_papers_by_abstract(papers: List[Dict[str, Any]], research_topic: str):
     """便捷函数：批量摘要筛选"""
@@ -355,3 +467,9 @@ async def analyze_papers_full(papers: List[Dict[str, Any]], research_topic: str)
     """便捷函数：批量深度分析"""
     analyzer = PaperAnalyzer()
     await analyzer.process_full_analysis(papers, research_topic)
+
+
+async def generate_keywords_for_topic(research_topic: str) -> List[str]:
+    """便捷函数：为研究主题生成检索关键词"""
+    analyzer = PaperAnalyzer()
+    return await analyzer.generate_search_keywords(research_topic)
