@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from openai import AsyncOpenAI
 from rich.console import Console
 from rich.progress import Progress
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log, RetryError
 import logging
 
 from core.config import (
@@ -240,16 +240,22 @@ class PaperAnalyzer:
         if category not in IMPROVEMENT_CATEGORIES:
             category = '其他'
         
+        # 辅助函数：确保值为字符串（将list转换为逗号分隔的字符串）
+        def ensure_str(value):
+            if isinstance(value, list):
+                return ', '.join(str(v) for v in value)
+            return str(value) if value is not None else '未明确提及'
+        
         return PaperAnalysis(
-            problem_definition=result.get('problem_definition', '未明确提及'),
-            mathematical_modeling=result.get('mathematical_modeling', '未明确提及'),
-            core_innovation=result.get('core_innovation', '未明确提及'),
-            theoretical_guarantee=result.get('theoretical_guarantee', '未明确提及'),
-            experimental_design=result.get('experimental_design', '未明确提及'),
-            quantitative_results=result.get('quantitative_results', '未明确提及'),
-            limitations=result.get('limitations', '未明确提及'),
-            innovation_ideas=result.get('innovation_ideas', '未明确提及'),
-            improvement_category=category,
+            problem_definition=ensure_str(result.get('problem_definition', '未明确提及')),
+            mathematical_modeling=ensure_str(result.get('mathematical_modeling', '未明确提及')),
+            core_innovation=ensure_str(result.get('core_innovation', '未明确提及')),
+            theoretical_guarantee=ensure_str(result.get('theoretical_guarantee', '未明确提及')),
+            experimental_design=ensure_str(result.get('experimental_design', '未明确提及')),
+            quantitative_results=ensure_str(result.get('quantitative_results', '未明确提及')),
+            limitations=ensure_str(result.get('limitations', '未明确提及')),
+            innovation_ideas=ensure_str(result.get('innovation_ideas', '未明确提及')),
+            improvement_category=ensure_str(category),
             relevance_score=0,
             relevance_reason=''
         )
@@ -364,7 +370,13 @@ class PaperAnalyzer:
                 console.log(f"[green]✓ 分析完成: {paper['title'][:50]}...")
                 
             except Exception as e:
-                console.log(f"[red]分析失败 {arxiv_id}: {e}")
+                # 提取原始错误信息（如果是RetryError）
+                original_error = e
+                if isinstance(e, RetryError):
+                    # 获取最后一次重试的原始异常
+                    if e.last_attempt.failed:
+                        original_error = e.last_attempt.exception()
+                console.log(f"[red]分析失败 {arxiv_id}: {original_error}")
                 db.update_paper(arxiv_id, {'status': 'analysis_failed'})
         
         # 并发处理
