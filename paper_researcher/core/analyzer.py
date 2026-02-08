@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from openai import AsyncOpenAI
 from rich.console import Console
 from rich.progress import Progress
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
+import logging
 
 from core.config import (
     DOUBAO_API_KEY, 
@@ -166,6 +167,13 @@ class PaperAnalyzer:
                 'relevance_reason': f'解析失败: {str(e)}'
             }
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((json.JSONDecodeError, Exception)),
+        before_sleep=lambda retry_state: console.log(f"[yellow]论文分析失败，{retry_state.next_action.sleep}秒后进行第{retry_state.attempt_number + 1}次重试..."),
+        reraise=True
+    )
     async def analyze_full_paper(self, title: str, content: str, research_topic: str) -> PaperAnalysis:
         """
         深度分析论文全文
@@ -213,56 +221,38 @@ class PaperAnalyzer:
             {"role": "user", "content": prompt}
         ]
         
-        try:
-            response, _ = await self._call_api(messages, temperature=0.3)
-            
-            # 清理响应，提取JSON部分
-            response = response.strip()
-            if response.startswith('```json'):
-                response = response[7:]
-            if response.startswith('```'):
-                response = response[3:]
-            if response.endswith('```'):
-                response = response[:-3]
-            response = response.strip()
-            
-            result = json.loads(response)
-            
-            # 验证改进方向分类
-            category = result.get('improvement_category', '其他')
-            if category not in IMPROVEMENT_CATEGORIES:
-                category = '其他'
-            
-            return PaperAnalysis(
-                problem_definition=result.get('problem_definition', '未明确提及'),
-                mathematical_modeling=result.get('mathematical_modeling', '未明确提及'),
-                core_innovation=result.get('core_innovation', '未明确提及'),
-                theoretical_guarantee=result.get('theoretical_guarantee', '未明确提及'),
-                experimental_design=result.get('experimental_design', '未明确提及'),
-                quantitative_results=result.get('quantitative_results', '未明确提及'),
-                limitations=result.get('limitations', '未明确提及'),
-                innovation_ideas=result.get('innovation_ideas', '未明确提及'),
-                improvement_category=category,
-                relevance_score=0,
-                relevance_reason=''
-            )
-            
-        except Exception as e:
-            console.log(f"[red]论文分析解析失败: {e}")
-            # 返回默认分析结果
-            return PaperAnalysis(
-                problem_definition=f'分析失败: {str(e)}',
-                mathematical_modeling='分析失败',
-                core_innovation='分析失败',
-                theoretical_guarantee='分析失败',
-                experimental_design='分析失败',
-                quantitative_results='分析失败',
-                limitations='分析失败',
-                innovation_ideas='分析失败',
-                improvement_category='其他',
-                relevance_score=0,
-                relevance_reason=''
-            )
+        response, _ = await self._call_api(messages, temperature=0.3)
+        
+        # 清理响应，提取JSON部分
+        response = response.strip()
+        if response.startswith('```json'):
+            response = response[7:]
+        if response.startswith('```'):
+            response = response[3:]
+        if response.endswith('```'):
+            response = response[:-3]
+        response = response.strip()
+        
+        result = json.loads(response)
+        
+        # 验证改进方向分类
+        category = result.get('improvement_category', '其他')
+        if category not in IMPROVEMENT_CATEGORIES:
+            category = '其他'
+        
+        return PaperAnalysis(
+            problem_definition=result.get('problem_definition', '未明确提及'),
+            mathematical_modeling=result.get('mathematical_modeling', '未明确提及'),
+            core_innovation=result.get('core_innovation', '未明确提及'),
+            theoretical_guarantee=result.get('theoretical_guarantee', '未明确提及'),
+            experimental_design=result.get('experimental_design', '未明确提及'),
+            quantitative_results=result.get('quantitative_results', '未明确提及'),
+            limitations=result.get('limitations', '未明确提及'),
+            innovation_ideas=result.get('innovation_ideas', '未明确提及'),
+            improvement_category=category,
+            relevance_score=0,
+            relevance_reason=''
+        )
     
     async def process_abstract_screening(self, papers: List[Dict[str, Any]], research_topic: str):
         """
